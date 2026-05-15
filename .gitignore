@@ -1,0 +1,5 @@
+node_modules/
+out/
+.vscode-test/
+*.vsix
+QtConfigure插件功能实现文档.md

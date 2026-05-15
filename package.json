@@ -1,0 +1,94 @@
+{
+    "name": "qtconfigure-enhanced",
+    "displayName": "QtConfigure Enhanced",
+    "description": "Generating configuration files for Qt project in VSCode",
+    "version": "0.2.0",
+    "engines": {
+        "vscode": "^1.27.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onCommand:qtConfigure.newQtProject",
+        "onCommand:qtConfigure.setQtDir",
+        "onCommand:qtConfigure.openQtDesigner",
+        "onCommand:qtConfigure.openQtAssistant"
+    ],
+    "publisher": "nzp0110",
+    "keywords": ["qt", "qtconfigure", "qtconfigure-enhanced"],
+    "icon": "image/VSCodeQtConfigurator.ico",
+    "main": "./out/extension.js",
+    "homepage": "https://github.com/nzp0110/QtConfigure-Enhanced",
+    "bugs": {
+        "url": "https://github.com/nzp0110/QtConfigure-Enhanced/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/nzp0110/QtConfigure-Enhanced"
+    },
+    "contributes": {
+        "commands": [{
+            "command": "qtConfigure.newQtProject",
+            "title": "QtConfigure : New Project"
+        }, {
+            "command": "qtConfigure.setQtDir",
+            "title": "QtConfigure : Set Qt Dir"
+        }, {
+            "command": "qtConfigure.openQtDesigner",
+            "title": "QtConfigure : Open Qt Designer"
+        }, {
+            "command": "qtConfigure.openQtAssistant",
+            "title": "QtConfigure : Open Qt Assistant"
+        }],
+
+        "configuration": {
+            "type": "object",
+            "title": "Qt Configure",
+            "properties": {
+                "qtConfigure.qtDir": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Qt 安装路径 (Qt installation path)"
+                },
+                "qtConfigure.vcvarsallPath": {
+                    "type": "string",
+                    "default": "C:\\Program Files (x86)\\Microsoft Visual Studio\\__VS_VERSION__\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat",
+                    "description": "Visual Studio vcvarsall.bat (配置环境变量、工作目录批处理文件) 路径。 (Visual studio vcvarsall.bat (configuration environment variables, working directory, batch file) path)"
+                },
+                "qtConfigure.mingwPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "MinGW 安装路径，需要到 bin 之前的那个目录，此值未设置时会在配置 Qt 安装路径后自动设置为 Qt 自带的 MinGW 路径 (The MinGW installation path needs to go to the directory before bin. If this value is not set, it will be automatically set to the MinGW path of Qt after configuring the Qt installation path)"
+                },
+                "qtConfigure.qtKitDir": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Qt 套件路径 (Qt Kit path)"
+                }
+            }
+        }
+
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.27.0",
+        "@types/glob": "^7.1.3",
+        "@types/mocha": "^8.2.2",
+        "@types/node": "14.x",
+        "eslint": "^7.27.0",
+        "@typescript-eslint/eslint-plugin": "^4.26.0",
+        "@typescript-eslint/parser": "^4.26.0",
+        "glob": "^7.1.7",
+        "mocha": "^8.4.0",
+        "typescript": "^4.3.2",
+        "vscode-test": "^1.5.2"
+    }
+}
