@@ -6,6 +6,13 @@
 -->
 # Change Log
 
+## [0.3.0] 2026/05/15
+
+* 项目名与主类名分离：创建项目时分别输入项目名（构建产物名）和主类名（C++ 类名/源文件名）
+* CMakeLists.txt 优化：最低版本提升至 3.16，显式的 SOURCES/HEADERS/FORMS 文件列表，WIN32 默认注释
+* main.cpp 中不再生成 `#pragma comment(lib, "user32.lib")`
+* 重命名为 QtConfigure Enhanced
+
 ## [0.2.0] 2021/12/18
 
 * 增加了对 CMake 的支持
