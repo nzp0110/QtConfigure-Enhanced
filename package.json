@@ -2,9 +2,9 @@
     "name": "qtconfigure-enhanced",
     "displayName": "QtConfigure Enhanced",
     "description": "Generating configuration files for Qt project in VSCode",
-    "version": "0.3.0",
+    "version": "0.6.2",
     "engines": {
-        "vscode": "^1.27.0"
+        "vscode": "^1.63.0"
     },
     "categories": [
         "Other"
@@ -13,7 +13,9 @@
         "onCommand:qtConfigure.newQtProject",
         "onCommand:qtConfigure.setQtDir",
         "onCommand:qtConfigure.openQtDesigner",
-        "onCommand:qtConfigure.openQtAssistant"
+        "onCommand:qtConfigure.openQtAssistant",
+        "onCommand:qtConfigure.openQtHelp",
+        "onCommand:qtConfigure.rebuildQtHelpIndex"
     ],
     "publisher": "nzp0110",
     "keywords": ["qt", "qtconfigure", "qtconfigure-enhanced"],
@@ -40,7 +42,49 @@
         }, {
             "command": "qtConfigure.openQtAssistant",
             "title": "QtConfigure : Open Qt Assistant"
+        }, {
+            "command": "qtConfigure.openQtHelp",
+            "title": "QtConfigure : Show Qt Help",
+            "category": "QtConfigure"
+        }, {
+            "command": "qtConfigure.rebuildQtHelpIndex",
+            "title": "QtConfigure : Rebuild Qt Help Index",
+            "category": "QtConfigure"
+        }, {
+            "command": "qtConfigure.helpBack",
+            "title": "QtConfigure : Qt Help Back",
+            "category": "QtConfigure"
+        }, {
+            "command": "qtConfigure.helpForward",
+            "title": "QtConfigure : Qt Help Forward",
+            "category": "QtConfigure"
         }],
+
+        "keybindings": [{
+            "command": "qtConfigure.openQtHelp",
+            "key": "f1",
+            "when": "editorTextFocus && (editorLangId == cpp || editorLangId == c || editorLangId == cpp-pch || editorLangId == cuda-cpp)"
+        }, {
+            "command": "qtConfigure.openQtHelp",
+            "key": "shift+f1",
+            "when": "editorTextFocus"
+        }, {
+            "command": "qtConfigure.helpBack",
+            "key": "ctrl+left",
+            "when": "activeWebviewPanelId == qtConfigure.help"
+        }, {
+            "command": "qtConfigure.helpForward",
+            "key": "ctrl+right",
+            "when": "activeWebviewPanelId == qtConfigure.help"
+        }],
+
+        "menus": {
+            "editor/context": [{
+                "command": "qtConfigure.openQtHelp",
+                "when": "editorLangId == cpp || editorLangId == c || editorLangId == cuda-cpp",
+                "group": "navigation@100"
+            }]
+        },
 
         "configuration": {
             "type": "object",
@@ -65,6 +109,27 @@
                     "type": "string",
                     "default": "",
                     "description": "Qt 套件路径 (Qt Kit path)"
+                },
+                "qtConfigure.qtHelpPaths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "存放 Qt 帮助文档 (.qch) 的目录。留空时自动从 Qt 安装路径下的 Docs 目录查找 (Directories containing Qt documentation (.qch) files. When empty, the Docs directory under the Qt installation path is used)"
+                },
+                "qtConfigure.qtHelpViewMode": {
+                    "type": "string",
+                    "enum": [
+                        "panel",
+                        "browser"
+                    ],
+                    "enumDescriptions": [
+                        "在 VS Code 侧边的面板中打开，跟随编辑器主题 (Open in a panel beside the editor, follows the editor theme)",
+                        "用系统默认浏览器打开本地帮助页，可在浏览器里自由跳转 (Open in the system default browser, free to navigate there)"
+                    ],
+                    "default": "panel",
+                    "markdownDescription": "按 F1 查看 Qt 帮助时的展示方式 (How to display Qt help when pressing F1)\n\n- `panel`：VS Code 侧边面板（Webview），不离开编辑器\n- `browser`：系统默认浏览器，跨模块链接更完整"
                 }
             }
         }
@@ -79,7 +144,7 @@
         "test": "node ./out/test/runTest.js"
     },
     "devDependencies": {
-        "@types/vscode": "^1.27.0",
+        "@types/vscode": "1.63.0",
         "@types/glob": "^7.1.3",
         "@types/mocha": "^8.2.2",
         "@types/node": "14.x",

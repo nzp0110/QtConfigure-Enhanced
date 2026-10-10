@@ -8,11 +8,18 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import { QtConfigurator } from './qt_configurator';
+import { QtHelpIndex } from './qt_help';
+import { HelpViewer } from './qt_help_viewer';
+import { QtHelpServer } from './qt_help_server';
+import { resolveSymbolAt } from './qt_symbol';
 import * as fs from "fs";
 import * as os from "os";
 
 
 let qtConfigurator = new QtConfigurator();
+let helpIndex: QtHelpIndex;
+let helpViewer: HelpViewer;
+let helpServer: QtHelpServer;
 
 // 1. 检查当前操作系统是否是 win32 或者 linux
 // 2. 检查当前路径下是否为空路径
@@ -129,7 +136,104 @@ function getQtClassName() {
 	});
 }
 
+/**
+ * 查看光标处 Qt 符号的帮助文档。
+ *
+ * 解析光标处的符号（如 QString::mid），到本地 .qch 文档里查找对应条目，
+ * 按 qtConfigure.qtHelpViewMode 的设置决定展示方式：
+ *   panel   —— 在 VS Code 侧边的 Webview 面板中打开
+ *   browser —— 用系统默认浏览器打开本地帮助页
+ */
+async function openQtHelp() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		vscode.window.showErrorMessage("请先打开一个源文件 (Please open a source file first)");
+		return;
+	}
+
+	const document = editor.document;
+	const position = editor.selection.active;
+
+	const symbol = await resolveSymbolAt(document, position);
+	if (!symbol) {
+		vscode.window.showWarningMessage("光标处没有可识别的符号 (No symbol found under the cursor)");
+		return;
+	}
+
+	try {
+		await helpIndex.ensureIndexed();
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		vscode.window.showErrorMessage(`QtConfigure: 索引 Qt 帮助文档失败：${message}`);
+		return;
+	}
+
+	if (!helpIndex.isReady) {
+		const action = await vscode.window.showWarningMessage(
+			"未找到 Qt 帮助文档，请确认已安装 Qt 文档（Qt Online Installer 中的 Documentation 组件）",
+			"设置帮助文档路径"
+		);
+		if (action === "设置帮助文档路径") {
+			await vscode.commands.executeCommand('workbench.action.openSettings', 'qtConfigure.qtHelpPaths');
+		}
+		return;
+	}
+
+	const hit = helpIndex.lookup(symbol.candidates);
+	if (!hit) {
+		await suggestSimilar(symbol.word);
+		return;
+	}
+
+	await showHelp(hit);
+}
+
+/** 按设置决定用面板还是浏览器展示 */
+async function showHelp(hit: { qchFile: string; fileName: string; anchor: string; title: string }) {
+	const mode = vscode.workspace.getConfiguration().get<string>('qtConfigure.qtHelpViewMode') ?? 'panel';
+	if (mode === 'browser') {
+		try {
+			await helpServer.open(hit);
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			vscode.window.showErrorMessage(`QtConfigure: 无法启动本地帮助服务：${message}`);
+		}
+		return;
+	}
+	await helpViewer.show(hit);
+}
+
+/** 未命中时给出相近的符号供选择 */
+async function suggestSimilar(word: string) {
+	const hits = helpIndex.search(word, 20);
+	if (hits.length === 0) {
+		vscode.window.showWarningMessage(`未找到 “${word}” 的帮助文档 (No documentation found for "${word}")`);
+		return;
+	}
+	const picked = await vscode.window.showQuickPick(
+		hits.map(hit => ({ label: hit.identifier, description: hit.title, hit })),
+		{ title: `未找到 “${word}”，请选择相近的符号 (No exact match, did you mean)` }
+	);
+	if (picked) {
+		await showHelp(picked.hit);
+	}
+}
+
 export function activate(context: vscode.ExtensionContext) {
+	helpIndex = new QtHelpIndex(context);
+	helpViewer = new HelpViewer(helpIndex);
+	helpServer = new QtHelpServer(helpIndex);
+
+	// 文档路径变化后让索引在下次使用时重建
+	let helpPathsChanged = vscode.workspace.onDidChangeConfiguration(e => {
+		if (e.affectsConfiguration('qtConfigure.qtHelpPaths') ||
+			e.affectsConfiguration('qtConfigure.qtDir') ||
+			e.affectsConfiguration('qtConfigure.qtKitDir')) {
+			helpIndex.clearCache();
+		}
+	});
+	context.subscriptions.push(helpPathsChanged);
+
 	let newQtProject = vscode.commands.registerCommand('qtConfigure.newQtProject', () => {
 		if (!isCanCreateProject()) {
 			return;
@@ -161,6 +265,33 @@ export function activate(context: vscode.ExtensionContext) {
 		qtConfigurator.openAssistant();
 	});
 
+	let openQtDoc = vscode.commands.registerCommand('qtConfigure.openQtHelp', () => {
+		return openQtHelp();
+	});
+
+	let rebuildQtDocIndex = vscode.commands.registerCommand('qtConfigure.rebuildQtHelpIndex', async () => {
+		helpIndex.clearCache();
+		await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: "QtConfigure: 正在重建 Qt 帮助索引" },
+			async () => {
+				await helpIndex.ensureIndexed(true);
+			}
+		);
+		vscode.window.showInformationMessage(
+			helpIndex.isReady
+				? `QtConfigure: 已索引 ${helpIndex.qchCount} 个帮助文件`
+				: "QtConfigure: 未找到 Qt 帮助文档"
+		);
+	});
+
+	let helpBack = vscode.commands.registerCommand('qtConfigure.helpBack', () => {
+		return helpViewer.goBack();
+	});
+
+	let helpForward = vscode.commands.registerCommand('qtConfigure.helpForward', () => {
+		return helpViewer.goForward();
+	});
+
 	let closeTerminal = vscode.window.onDidCloseTerminal(t => {
 		if (t.name == "qtTerminal") {
 			qtConfigurator.closeTerminal();
@@ -172,8 +303,15 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(closeTerminal);
 	context.subscriptions.push(openQtDesigner);
 	context.subscriptions.push(openQtAssistant);
+	context.subscriptions.push(openQtDoc);
+	context.subscriptions.push(rebuildQtDocIndex);
+	context.subscriptions.push(helpBack);
+	context.subscriptions.push(helpForward);
 }
 
 
 // this method is called when your extension is deactivated
-export function deactivate() { }
+export function deactivate() {
+	// 关掉本地帮助服务，避免 VS Code 退出后仍占用端口
+	helpServer?.stop();
+}

@@ -1,12 +1,18 @@
 .vscode/**
 .vscode-test/**
+.workbuddy/**
 out/test/**
 
 src/**
+templates/**
+
 .gitignore
 .yarnrc
 vsc-extension-quickstart.md
+AGENTS.md
 **/tsconfig.json
 **/.eslintrc.json
 **/*.map
 **/*.ts
+
+*.vsix
