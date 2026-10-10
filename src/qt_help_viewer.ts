@@ -544,8 +544,13 @@ const currentFile = ${JSON.stringify(fileName)};
 
 // 定位到目标函数/类。
 //
+// 时序约束：VS Code webview 更新 html 时会重建 iframe，宿主页在新文档
+// load（或其 200ms 兜底）时把滚动恢复成上一次的位置。这是宿主页主动
+// window.scroll()，history.scrollRestoration 管不到它。因此所有定位
+// 动作必须发生在 load 且布局稳定之后，才能盖过宿主页的恢复。
+//
 // Qt 文档的样式表与图片加载后会把页面撑高，过早滚动会落到错误位置
-// （原文脚本里也有同样的注释）。这里的做法是等文档高度稳定后再滚动一次。
+// （原文脚本里也有同样的注释），所以等文档高度稳定后再滚动一次。
 // 用 setTimeout 而不是 requestAnimationFrame：面板可能处于后台，
 // 此时 rAF 不会触发，而定时器仍会执行。
 let lastHeight = -1;
@@ -565,6 +570,13 @@ function findAnchor() {
 
 function jump() {
   if (done) return;
+  if (!anchor) {
+    // 无锚点（如类页面）应停在顶部。归零同样要等布局稳定后做：
+    // 过早执行会被宿主页恢复的旧滚动位置盖掉（见文件头时序说明）。
+    done = true;
+    window.scrollTo(0, 0);
+    return;
+  }
   const element = findAnchor();
   if (!element) {
     // 目标可能还没随内容出现，稍后再试
@@ -596,9 +608,7 @@ function schedule() {
   setTimeout(schedule, 60);
 }
 
-if (!anchor) {
-  done = true;
-} else if (document.readyState === 'complete') {
+if (document.readyState === 'complete') {
   schedule();
 } else {
   window.addEventListener('load', schedule);
