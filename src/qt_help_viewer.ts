@@ -5,6 +5,7 @@
  * 把 .qch 中解包出来的 HTML 显示在 Webview 里，并支持：
  *   - 跳转到指定锚点（对应某个函数/类）
  *   - 页内链接点击后在本面板内继续导航，不跳出编辑器
+ *   - 后退/前进：与浏览器、Qt Creator 一致，同页锚点跳转也计入历史
  *   - 跟随 VS Code 主题
  */
 import * as vscode from "vscode";
@@ -14,9 +15,26 @@ import { QtHelpIndex, HelpTarget } from "./qt_help";
 
 /** 面板与扩展之间的消息 */
 interface WebviewMessage {
-    type: "navigate" | "openExternal" | "back" | "forward";
+    type: "navigate" | "openExternal" | "back" | "forward" | "anchor" | "scroll";
     href?: string;
+    /** anchor/scroll 消息：页内锚点 id */
+    anchor?: string;
+    /** 消息发出瞬间页面已滚到的纵向位置 */
+    scrollY?: number;
+    /** 发出消息的文档编号；换页后旧文档残留的消息靠它丢弃 */
+    docId?: number;
 }
+
+/** 扩展发给面板的指令 */
+type PanelCommand =
+    | {
+        type: "goto";
+        anchor: string;
+        scrollY?: number;
+        canGoBack: boolean;
+        canGoForward: boolean;
+    }
+    | { type: "history"; canGoBack: boolean; canGoForward: boolean };
 
 export class HelpViewer {
     private panel: vscode.WebviewPanel | undefined;
@@ -29,11 +47,21 @@ export class HelpViewer {
      *
      * Webview 的内容是整体替换的（panel.webview.html = ...），这会重置
      * Webview 自身的会话历史，所以浏览器/Webview 的回退在这里不可用，
-     * 需要自己维护一个栈来提供「返回上一页」。
+     * 需要自己维护一个栈来提供「返回/前进」。
+     *
+     * 与浏览器会话历史保持一致的两点：
+     *   - 同页锚点跳转（类页面里点成员链接）也压入条目。浏览器和
+     *     Qt Creator 都会记录这类跳转，否则后退/前进无法在同一个
+     *     类页面里来回；
+     *   - 每个条目记录离开时的滚动位置，后退/前进按条目恢复位置，
+     *     而不是简单地重新跳一次锚点。
      */
-    private history: { fileName: string; anchor: string; dir: string }[] = [];
+    private history: { fileName: string; anchor: string; dir: string; scrollY?: number }[] = [];
     /** 当前位于 history 中的位置；-1 表示还没有历史 */
     private historyIndex = -1;
+    /** 文档编号：每次 render 递增，用于识别消息来自哪个版本的页面 */
+    private docCounter = 0;
+    private activeDocId = -1;
 
     constructor(private readonly index: QtHelpIndex) { }
 
@@ -100,45 +128,111 @@ export class HelpViewer {
             return;
         }
         if (message.type === "navigate" && message.href) {
+            // 先把点击时刻的位置记到正在离开的条目上，再压入新条目
+            this.saveScrollY(message.scrollY, message.docId);
             void this.navigate(message.href);
             return;
         }
+        if (message.type === "anchor") {
+            // 同页锚点跳转：页面已自行滚动，扩展只需把它记入历史
+            this.recordAnchor(message.anchor ?? "", message.scrollY, message.docId);
+            return;
+        }
         if (message.type === "back") {
-            void this.goBack();
+            void this.goBack(message.scrollY, message.docId);
             return;
         }
         if (message.type === "forward") {
-            void this.goForward();
+            void this.goForward(message.scrollY, message.docId);
+            return;
+        }
+        if (message.type === "scroll") {
+            // 滚动位置上报：让当前条目的位置保持最新。快捷键
+            // (Ctrl+Left/Right) 触发的后退/前进不经过页面，靠的就是它。
+            this.saveScrollY(message.scrollY, message.docId);
         }
     }
 
     /** 返回上一页 */
-    public async goBack(): Promise<void> {
+    public async goBack(scrollY?: number, docId?: number): Promise<void> {
         if (!this.panel || this.historyIndex <= 0) {
             return;
         }
+        this.saveScrollY(scrollY, docId);
         this.historyIndex--;
         await this.restoreHistoryEntry();
     }
 
     /** 前进到下一页 */
-    public async goForward(): Promise<void> {
+    public async goForward(scrollY?: number, docId?: number): Promise<void> {
         if (!this.panel || this.historyIndex >= this.history.length - 1) {
             return;
         }
+        this.saveScrollY(scrollY, docId);
         this.historyIndex++;
         await this.restoreHistoryEntry();
     }
 
-    /** 按历史栈中的记录重新渲染页面 */
+    /** 按历史栈中的记录恢复页面：同一页直接滚动，跨页重新渲染 */
     private async restoreHistoryEntry(): Promise<void> {
         const entry = this.history[this.historyIndex];
         if (!entry || !this.panel) {
             return;
         }
+        if (entry.fileName === this.currentFile && entry.dir === this.currentDir) {
+            // 后退/前进落在了同一页上：不重渲染（整页替换会闪一下，
+            // 浏览器和 Qt Creator 对同页后退也是原地滚动），直接恢复位置。
+            this.postToWebview({
+                type: "goto",
+                anchor: entry.anchor,
+                scrollY: entry.scrollY,
+                canGoBack: this.historyIndex > 0,
+                canGoForward: this.historyIndex < this.history.length - 1
+            });
+            return;
+        }
         this.currentFile = entry.fileName;
         this.currentDir = entry.dir;
-        await this.render(this.panel, entry.fileName, entry.anchor, "");
+        await this.render(this.panel, entry.fileName, entry.anchor, "", entry.scrollY);
+    }
+
+    /** 把滚动位置记到当前条目上；docId 对不上说明是换页前旧文档的残留消息 */
+    private saveScrollY(scrollY: number | undefined, docId: number | undefined): void {
+        if (typeof scrollY !== "number" || !isFinite(scrollY)) {
+            return;
+        }
+        if (docId !== undefined && docId !== this.activeDocId) {
+            return;
+        }
+        const entry = this.history[this.historyIndex];
+        if (entry) {
+            entry.scrollY = scrollY;
+        }
+    }
+
+    /** 记录一次同页锚点跳转；在历史中段跳转时丢弃「未来」的分支 */
+    private recordAnchor(anchor: string, scrollY: number | undefined, docId: number | undefined): void {
+        if (!this.panel || !this.currentFile || !this.currentDir || this.historyIndex < 0) {
+            return;
+        }
+        if (docId !== undefined && docId !== this.activeDocId) {
+            return;
+        }
+        this.saveScrollY(scrollY, undefined);
+        this.pushHistory(this.currentFile, anchor, this.currentDir);
+        // 没有重渲染，工具栏按钮的可用状态需要单独同步
+        this.postToWebview({
+            type: "history",
+            canGoBack: this.historyIndex > 0,
+            canGoForward: this.historyIndex < this.history.length - 1
+        });
+    }
+
+    private postToWebview(message: PanelCommand): void {
+        if (!this.panel) {
+            return;
+        }
+        this.panel.webview.postMessage(message).then(undefined, () => undefined);
     }
 
     /** 记录一次跳转；在历史中段跳转时丢弃「未来」的分支 */
@@ -196,12 +290,13 @@ export class HelpViewer {
         await this.render(this.panel, fileName, targetAnchor, "");
     }
 
-    /** 读取 HTML，注入 base 与脚本后送入面板 */
+    /** 读取 HTML，注入 base 与脚本后送入面板；restoreY 用于按历史条目恢复滚动位置 */
     private async render(
         panel: vscode.WebviewPanel,
         fileName: string,
         anchor: string,
-        title: string
+        title: string,
+        restoreY?: number
     ): Promise<void> {
         if (!this.currentDir) {
             return;
@@ -219,6 +314,8 @@ export class HelpViewer {
         // 相对路径的 css/图片通过 base 指向 Webview 可访问的地址
         const baseUri = panel.webview.asWebviewUri(vscode.Uri.file(this.currentDir));
         const nonce = HelpViewer.makeNonce();
+        const docId = ++this.docCounter;
+        this.activeDocId = docId;
 
         const html = HelpViewer.inject(raw, {
             base: baseUri.toString() + "/",
@@ -227,6 +324,8 @@ export class HelpViewer {
             title,
             cspSource: panel.webview.cspSource,
             fileName,
+            docId,
+            restoreY,
             canGoBack: this.historyIndex > 0,
             canGoForward: this.historyIndex < this.history.length - 1
         });
@@ -273,11 +372,13 @@ export class HelpViewer {
             title: string;
             cspSource: string;
             fileName: string;
+            docId: number;
+            restoreY?: number;
             canGoBack: boolean;
             canGoForward: boolean;
         }
     ): string {
-        const { base, nonce, anchor, cspSource, fileName, canGoBack, canGoForward } = options;
+        const { base, nonce, anchor, cspSource, fileName, docId, restoreY, canGoBack, canGoForward } = options;
 
         let html = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
         html = html.replace(/<base\b[^>]*>/gi, "");
@@ -315,8 +416,8 @@ export class HelpViewer {
         const csp = cspSource
             ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; font-src ${cspSource}; base-uri ${cspSource};">`
             : "";
-        const style = `<style nonce="${nonce}">${HelpViewer.style()}</style>`;
-        const script = `<script nonce="${nonce}">${HelpViewer.script(anchor, fileName)}</script>`;
+        const style = `<style nonce="${nonce}">${HelpViewer.style()}${HelpViewer.locatingStyle(anchor, restoreY)}</style>`;
+        const script = `<script nonce="${nonce}">${HelpViewer.script(anchor, fileName, restoreY, docId)}</script>`;
 
         if (/<head[^>]*>/i.test(html)) {
             // base 与 CSP 要尽量靠前，样式则要放在 head 末尾：
@@ -536,11 +637,44 @@ body.vscode-dark img:not([src*="ico_"]) {
 `;
     }
 
-    /** 页面脚本：拦截链接交给扩展处理，并在加载后滚动到锚点 */
-    private static script(anchor: string, fileName: string): string {
+    /**
+     * 定位型页面（带锚点，或按历史条目恢复位置）的隐藏样式。
+     *
+     * 浏览器的后退/前进是在首次绘制之前恢复滚动位置的，页面「直接出现
+     * 在正确位置」；而这里必须等布局稳定才能定位准，若放任先绘制，就会
+     * 出现「先停在页顶、布局稳定后才闪跳到目标」的中间态——跨类后退时
+     * 尤其明显（先见 qstring 页顶再闪到函数处）。因此定位型页面先整页
+     * 隐藏，脚本定位完成后用行内样式揭示。
+     *
+     * 动画是纯 CSS 兜底：脚本万一失效（注入脚本曾出过语法错误导致整段
+     * 失效的事故），3 秒后自动显示，不会永久白屏。无锚点的普通类页面
+     * 不隐藏，照常立即显示。
+     */
+    private static locatingStyle(anchor: string, restoreY: number | undefined): string {
+        if (!anchor && restoreY === undefined) {
+            return "";
+        }
+        return `
+/* 定位前隐藏整页，定位完成后由脚本揭示；3 秒动画兜底防脚本失效 */
+html { visibility: hidden; animation: qtHelpReveal 0s 3s forwards; }
+@keyframes qtHelpReveal { to { visibility: visible; } }
+`;
+    }
+
+    /**
+     * 页面脚本：拦截链接交给扩展处理、加载后滚动到锚点、上报滚动位置，
+     * 并响应扩展的 goto（同页后退/前进原地恢复位置）与 history（工具栏状态）指令。
+     */
+    private static script(anchor: string, fileName: string, restoreY: number | undefined, docId: number): string {
+        const restoreYLiteral = typeof restoreY === "number" && isFinite(restoreY)
+            ? String(Math.round(restoreY))
+            : "null";
         return `
 const anchor = ${JSON.stringify(anchor)};
 const currentFile = ${JSON.stringify(fileName)};
+// 从历史条目恢复时的目标滚动位置；null 表示按 anchor（或页顶）定位
+const restoreY = ${restoreYLiteral};
+const docId = ${JSON.stringify(docId)};
 
 // 定位到目标函数/类。
 //
@@ -553,28 +687,50 @@ const currentFile = ${JSON.stringify(fileName)};
 // （原文脚本里也有同样的注释），所以等文档高度稳定后再滚动一次。
 // 用 setTimeout 而不是 requestAnimationFrame：面板可能处于后台，
 // 此时 rAF 不会触发，而定时器仍会执行。
+//
+// 代价：定位型页面的注入样式表在布局稳定前整页 visibility:hidden，
+// 定位完成后 reveal() 用行内样式揭示，页面「直接出现在目标位置」，
+// 与浏览器后退的表现一致；动画兜底见 locatingStyle()。
 let lastHeight = -1;
 let stableChecks = 0;
 let done = false;
 let retries = 6;
 
-function findAnchor() {
-  if (!anchor) return null;
+function findAnchorById(id) {
+  if (!id) return null;
   let element = null;
-  try { element = document.getElementById(anchor); } catch (e) { }
+  try { element = document.getElementById(id); } catch (e) { }
   if (!element) {
-    try { element = document.querySelector('#' + CSS.escape(anchor)); } catch (e) { }
+    try { element = document.querySelector('#' + CSS.escape(id)); } catch (e) { }
   }
   return element;
 }
 
+function findAnchor() {
+  return findAnchorById(anchor);
+}
+
+// 定位完成后揭示页面（行内样式盖过定位型页面注入的 html { visibility: hidden }）
+function reveal() {
+  document.documentElement.style.visibility = 'visible';
+}
+
 function jump() {
   if (done) return;
+  if (restoreY !== null) {
+    // 从历史条目恢复：回到离开该条目时的位置。浏览器按条目记录的是
+    // 位置而不是锚点——用户离开后可能又滚动过，锚点只是初始近似值。
+    done = true;
+    window.scrollTo(0, restoreY);
+    reveal();
+    return;
+  }
   if (!anchor) {
     // 无锚点（如类页面）应停在顶部。归零同样要等布局稳定后做：
     // 过早执行会被宿主页恢复的旧滚动位置盖掉（见文件头时序说明）。
     done = true;
     window.scrollTo(0, 0);
+    reveal();
     return;
   }
   const element = findAnchor();
@@ -582,6 +738,12 @@ function jump() {
     // 目标可能还没随内容出现，稍后再试
     if (retries-- > 0) {
       setTimeout(schedule, 120);
+    } else {
+      // 重试耗尽仍找不到：与浏览器对失效锚点的行为一致回到页首；
+      // 无论哪条路径退出都必须揭示页面，不能把页面永远藏住。
+      done = true;
+      window.scrollTo(0, 0);
+      reveal();
     }
     return;
   }
@@ -589,6 +751,7 @@ function jump() {
   element.scrollIntoView({ block: 'start' });
   element.classList.add('qt-help-target');
   setTimeout(function () { element.classList.remove('qt-help-target'); }, 1500);
+  reveal();
 }
 
 function schedule() {
@@ -626,15 +789,28 @@ document.addEventListener('click', function (event) {
   const href = link.getAttribute('href');
   if (!href) return;
 
-  // 页内锚点直接滚动，不必往返扩展
+  // 点击瞬间的滚动位置：扩展把它记到正在离开的历史条目上，
+  // 之后前进回到该条目时才能恢复到这里（浏览器按条目记忆位置）。
+  const clickY = window.scrollY;
+
+  // 页内锚点直接滚动，不必往返扩展。
+  // 同时要像浏览器一样把这次跳转压入历史（anchor 消息）：浏览器和
+  // Qt Creator 都会记录同页跳转，否则后退/前进无法在同一个类里来回。
   if (href.charAt(0) === '#') {
     event.preventDefault();
-    scrollToId(href.slice(1));
+    const id = href.slice(1);
+    if (findAnchorById(id)) {
+      scrollToId(id);
+    } else {
+      // 空锚点（href="#"）或目标 id 不存在：浏览器此时会回到页首
+      window.scrollTo(0, 0);
+    }
+    post({ type: 'anchor', anchor: id, scrollY: clickY });
     return;
   }
 
   // 指向当前页面自身的链接（形如 qstring.html#mid）——与浏览器行为一致：
-  // 只改 hash 并滚动到锚点，不重新加载页面。
+  // 只改 hash 并滚动到锚点，不重新加载页面；同时压入历史（anchor 消息）。
   // 若交给扩展重渲染整页，滚动位置会丢失，表现为「点了不跳」。
   const inner = href.replace(/^qt-help:/i, '');
   const hashAt = inner.indexOf('#');
@@ -642,20 +818,21 @@ document.addEventListener('click', function (event) {
   const targetAnchor = hashAt === -1 ? '' : inner.slice(hashAt + 1);
   if (targetFile === currentFile || targetFile === '') {
     event.preventDefault();
-    if (targetAnchor) {
+    if (findAnchorById(targetAnchor)) {
       scrollToId(targetAnchor);
     } else {
-      // 同页且无锚点（如正文里的 "qlist.html" 链接）：
-      // 浏览器会重新加载该页并停在顶部，这里等价地滚回顶部。
+      // 同页且无锚点（如正文里的 "qlist.html" 链接），或锚点 id 不存在：
+      // 浏览器此时会回到页首，这里保持一致。
       window.scrollTo(0, 0);
     }
+    post({ type: 'anchor', anchor: targetAnchor, scrollY: clickY });
     return;
   }
 
   event.preventDefault();
 
   if (/^qt-help:/i.test(href)) {
-    post({ type: 'navigate', href: href });
+    post({ type: 'navigate', href: href, scrollY: clickY });
     return;
   }
   // 注意：这里用 indexOf 而不是正则。模板字符串里 \\\\ 会被吃掉一层，
@@ -669,21 +846,72 @@ document.addEventListener('click', function (event) {
 
 // 滚动到指定 id 并短暂高亮，与初始打开时的定位表现一致
 function scrollToId(id) {
-  let element = null;
-  try { element = document.getElementById(id); } catch (e) { }
-  if (!element) {
-    try { element = document.querySelector('#' + CSS.escape(id)); } catch (e) { }
-  }
+  const element = findAnchorById(id);
   if (!element) return;
   element.scrollIntoView({ block: 'start' });
   element.classList.add('qt-help-target');
   setTimeout(function () { element.classList.remove('qt-help-target'); }, 1500);
 }
 
+// 扩展发来的指令：
+//   goto    —— 后退/前进落在同一页上时原地恢复位置，不重渲染整页；
+//              顺带同步工具栏按钮的可用状态
+//   history —— 同页锚点跳转压入历史后，同步工具栏按钮状态
+window.addEventListener('message', function (event) {
+  const msg = event.data;
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'goto') {
+    if (typeof msg.scrollY === 'number' && isFinite(msg.scrollY)) {
+      // 条目记录的是离开时的位置，直接回到那里（浏览器同页后退的表现）
+      window.scrollTo(0, msg.scrollY);
+    } else if (findAnchorById(msg.anchor)) {
+      scrollToId(msg.anchor);
+    } else {
+      // 条目没有位置记录、锚点又不存在/为空：回到页首
+      window.scrollTo(0, 0);
+    }
+    if (typeof msg.canGoBack === 'boolean') {
+      setButton('qtHelpBack', msg.canGoBack);
+    }
+    if (typeof msg.canGoForward === 'boolean') {
+      setButton('qtHelpForward', msg.canGoForward);
+    }
+    return;
+  }
+  if (msg.type === 'history') {
+    setButton('qtHelpBack', !!msg.canGoBack);
+    setButton('qtHelpForward', !!msg.canGoForward);
+  }
+});
+
+function setButton(id, enabled) {
+  const button = document.getElementById(id);
+  if (!button) return;
+  if (enabled) {
+    button.removeAttribute('disabled');
+  } else {
+    button.setAttribute('disabled', 'disabled');
+  }
+}
+
+// 上报滚动位置，扩展把它记到当前历史条目上。快捷键 (Ctrl+Left/Right)
+// 触发的后退/前进不经过本页面，扩展只能从这里拿最新位置。
+// 滚动停止 250ms 后补发最终位置即可，不必逐帧上报。
+let scrollReportTimer = null;
+window.addEventListener('scroll', function () {
+  if (scrollReportTimer !== null) return;
+  scrollReportTimer = setTimeout(function () {
+    scrollReportTimer = null;
+    post({ type: 'scroll', scrollY: window.scrollY });
+  }, 250);
+}, { passive: true });
+
 // 与扩展通信。acquireVsCodeApi 每个 Webview 只能调用一次，
 // 重复调用会抛异常，所以这里缓存下来复用。
 let vscodeApi = null;
 function post(message) {
+  // 带上文档编号，扩展用它丢弃换页后旧文档残留的消息
+  message.docId = docId;
   if (vscodeApi === null) {
     try {
       vscodeApi = acquireVsCodeApi();
@@ -700,20 +928,21 @@ function post(message) {
   }
 }
 
-// 返回 / 前进按钮。历史栈由扩展侧维护，这里只负责转发。
+// 返回 / 前进按钮。历史栈由扩展侧维护，这里把点击时刻的滚动位置
+// 一并转发，供扩展记到正在离开的条目上。
 (function () {
   const back = document.getElementById('qtHelpBack');
   const forward = document.getElementById('qtHelpForward');
   if (back) {
     back.addEventListener('click', function (e) {
       e.preventDefault();
-      post({ type: 'back' });
+      post({ type: 'back', scrollY: window.scrollY });
     });
   }
   if (forward) {
     forward.addEventListener('click', function (e) {
       e.preventDefault();
-      post({ type: 'forward' });
+      post({ type: 'forward', scrollY: window.scrollY });
     });
   }
 })();
