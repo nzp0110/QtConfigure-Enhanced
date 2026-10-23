@@ -45,6 +45,11 @@
 - 支持两种展示方式（见下），默认在 VS Code 侧边面板中打开
 - 深色主题自动适配
 
+### 5. 用 Qt Designer 打开 .ui 文件
+
+资源管理器右键 `.ui` 文件（支持多选）直接用 Qt Designer 打开，不再限于本项目生成的 .ui；
+还可选开启「双击 .ui 自动用 Qt Designer 打开」（见下文）。
+
 ## Features
 
 * Command: `QtConfigure : New Project` 生成 Qt 项目配置文件
@@ -52,7 +57,8 @@
 * Command: `QtConfigure : Set Qt Dir` 选择 Qt 安装目录，注意是安装目录，而不是 Qt 套件目录，
 该扩展会根据 Qt 安装路径搜索相应的 Qt 套件以及编译器
 
-* Command: `QtConfigure : Open Qt Designer` 打开 Qt Designer，该命令仅在生成 Qt Ui 项目后才能使用
+* Command: `QtConfigure : Open Qt Designer` 用 Qt Designer 打开 .ui 文件：
+在资源管理器右键一个或多个 `.ui` 文件直接打开；从命令面板调用则打开当前项目 `src/` 下的 .ui（原有行为）
 
 * Command: `QtConfigure : Open Qt Assistant` 打开 Qt Assistant
 
@@ -112,6 +118,24 @@ QFile::remove(p);   // 光标在 QFile 上按 F1 -> 打开 QFile 类；在 remov
 
 命令面板也可以用 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打开，
 这个快捷键不受影响。
+
+### 用 Qt Designer 打开 .ui 文件
+
+**右键打开**：在资源管理器中右键一个或多个 `.ui` 文件，选择
+`QtConfigure : Open Qt Designer` 即可用 Qt Designer 打开（使用当前设置的 Qt 套件，
+多个文件会在同一个 Designer 实例中打开）。
+
+**双击自动打开**：设置项 `qtConfigure.designerAutoOpen`（默认关闭）开启后，
+双击 `.ui` 文件不再进入文本编辑器，而是显示一个占位视图并自动用 Qt Designer 打开；
+关闭开关即恢复 VS Code 默认的文本编辑器。
+
+- 开启时会向用户设置 `workbench.editorAssociations` 添加 `*.ui` 与本扩展的关联，
+  关闭时移除该关联（不影响手动配置的其它文件关联）
+- 占位视图里有「在 Qt Designer 中打开」按钮，可用于手动打开或重新拉起
+
+**格式识别**：只有 Qt Designer 格式（根元素为 `<ui>` 的 XML）才会被打开或接管——
+Glade（GTK）等其它工具的同名 `.ui` 文件右键时会被跳过并提示，
+双击时自动转回文本编辑器，不会被错误接管。
 
 ### CMake
 

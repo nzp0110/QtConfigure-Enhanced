@@ -7,10 +7,11 @@ VS Code 扩展：在 VSCode 中生成 Qt 项目配置文件，支持 CMake/QMake
 ```
 package.json 声明命令/配置项/激活事件
 src/
-  extension.ts        — 入口：注册 4 个命令 + 编排交互流程
-  qt_configurator.ts  — 业务逻辑：路径扫描、文件生成、终端管理
-  template_files.ts   — 所有生成文件的模板（字符串常量 + `__占位符__` 替换）
-templates/projects/   — 未使用（所有模板在 template_files.ts 内联）
+  extension.ts          — 入口：注册 4 个命令 + 编排交互流程
+  qt_configurator.ts    — 业务逻辑：路径扫描、文件生成、终端管理
+  template_files.ts     — 所有生成文件的模板（字符串常量 + `__占位符__` 替换）
+  ui_designer_editor.ts — .ui 文件的 Qt Designer 占位编辑器（CustomTextEditorProvider）
+templates/projects/     — 未使用（所有模板在 template_files.ts 内联）
 ```
 
 ## 关键命令
@@ -19,7 +20,7 @@ templates/projects/   — 未使用（所有模板在 template_files.ts 内联�
 |------|------|
 | `qtConfigure.newQtProject` | 交互式创建 Qt 项目 |
 | `qtConfigure.setQtDir` | 选择 Qt 安装目录，自动扫描套件 |
-| `qtConfigure.openQtDesigner` | 打开 Qt Designer（需带 UI 的项目） |
+| `qtConfigure.openQtDesigner` | 用 Qt Designer 打开 .ui 文件：资源管理器右键（可多选）直接打开选中文件；命令面板调用则猜 `src/<项目名>.ui`（原逻辑） |
 | `qtConfigure.openQtAssistant` | 打开 Qt Assistant |
 
 ## 构建与测试
@@ -50,8 +51,17 @@ npm run test         # VS Code 集成测试（vscode-test），需下载 VS Code
 | `qtConfigure.qtKitDir` | **工作区** | 当前选中的 Qt 套件路径 |
 | `qtConfigure.mingwPath` | 全局 | MinGW 路径，自动推断 |
 | `qtConfigure.vcvarsallPath` | 全局 | MSVC vcvarsall.bat 路径 |
+| `qtConfigure.designerAutoOpen` | 全局（开关） | 开启后双击 .ui 由占位编辑器接管并自动拉起 Qt Designer（默认 false） |
 
 注意：`qtKitDir` 写入工作区配置（`update(..., false)`），其余写入全局配置（`true`）。
+
+## .ui 文件的 Designer 打开机制
+
+- 右键打开走 `openUiFile()`：`spawn(designer, files, { detached, stdio: 'ignore' })` + `error` 监听 + `unref()`（**不走 qtTerminal 终端**，与旧 `openDesigner()` 并存）
+- **内容嗅探 `isQtDesignerUiFile()`**：只读头部 2KB，剥 BOM/XML 声明/DOCTYPE/前导注释后要求根元素为 `<ui>`。判据对齐 Designer 自身解析能力，嗅探不过的（Glade `<interface>`、Qt3 `<UI>`、非 XML）Designer 本来也打不开；右键会跳过并提示，占位视图自动转回文本编辑器
+- `designerAutoOpen` 开关通过写用户级 `workbench.editorAssociations`（`*.ui` → `qtConfigure.uiDesignerView`）实现双击接管；`customEditors` 贡献点用 `priority: "option"`（静态 default 无法按开关关闭）
+- 占位编辑器（`ui_designer_editor.ts`）按会话内 fsPath 去重自动拉起，切标签不重复拉；按钮可手动/重新拉起
+- 卸载扩展后 `workbench.editorAssociations` 可能残留条目，VS Code 会回退默认编辑器，不做清理
 
 ## Qt 套件扫描算法
 
