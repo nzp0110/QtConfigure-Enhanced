@@ -12,6 +12,7 @@ import { QtHelpIndex } from './qt_help';
 import { HelpViewer } from './qt_help_viewer';
 import { QtHelpServer } from './qt_help_server';
 import { resolveSymbolAt } from './qt_symbol';
+import { UiDesignerEditorProvider, UI_DESIGNER_VIEW_TYPE, syncEditorAssociation } from './ui_designer_editor';
 import * as fs from "fs";
 import * as os from "os";
 
@@ -231,8 +232,23 @@ export function activate(context: vscode.ExtensionContext) {
 			e.affectsConfiguration('qtConfigure.qtKitDir')) {
 			helpIndex.clearCache();
 		}
+		if (e.affectsConfiguration('qtConfigure.designerAutoOpen')) {
+			syncEditorAssociation();
+		}
 	});
 	context.subscriptions.push(helpPathsChanged);
+
+	// .ui 文件的 Qt Designer 占位编辑器（designerAutoOpen 开启时接管双击打开）
+	let uiDesignerProvider = vscode.window.registerCustomEditorProvider(
+		UI_DESIGNER_VIEW_TYPE,
+		new UiDesignerEditorProvider(qtConfigurator),
+		{
+			webviewOptions: { retainContextWhenHidden: true },
+			supportsMultipleEditorsPerDocument: false
+		}
+	);
+	context.subscriptions.push(uiDesignerProvider);
+	syncEditorAssociation();
 
 	let newQtProject = vscode.commands.registerCommand('qtConfigure.newQtProject', () => {
 		if (!isCanCreateProject()) {
@@ -257,8 +273,19 @@ export function activate(context: vscode.ExtensionContext) {
 		getQtDir();
 	});
 
-	let openQtDesigner = vscode.commands.registerCommand('qtConfigure.openQtDesigner', () => {
-		qtConfigurator.openDesigner();
+	let openQtDesigner = vscode.commands.registerCommand('qtConfigure.openQtDesigner', (uri?: vscode.Uri, uris?: vscode.Uri[]) => {
+		// 资源管理器右键（可多选）时带 uri 参数，直接打开选中的 .ui 文件；
+		// 从命令面板调用时无参，维持原有的猜测 src/<项目名>.ui 逻辑
+		const selected = (uris && uris.length > 0 ? uris : (uri ? [uri] : []))
+			.filter(u => /\.ui$/i.test(u.fsPath));
+		if (selected.length > 0) {
+			qtConfigurator.openUiFile(selected.map(u => u.fsPath));
+		} else if (uri) {
+			// 右键的不是 .ui 文件，忽略（菜单 when 已保证不会走到这里）
+			return;
+		} else {
+			qtConfigurator.openDesigner();
+		}
 	});
 
 	let openQtAssistant = vscode.commands.registerCommand('qtConfigure.openQtAssistant', () => {

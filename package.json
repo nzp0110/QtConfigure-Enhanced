@@ -15,7 +15,9 @@
     "onCommand:qtConfigure.openQtDesigner",
     "onCommand:qtConfigure.openQtAssistant",
     "onCommand:qtConfigure.openQtHelp",
-    "onCommand:qtConfigure.rebuildQtHelpIndex"
+    "onCommand:qtConfigure.rebuildQtHelpIndex",
+    "onCustomEditor:qtConfigure.uiDesignerView",
+    "workspaceContains:**/*.ui"
   ],
   "publisher": "nzp0110",
   "keywords": [
@@ -101,8 +103,27 @@
           "when": "editorLangId == cpp || editorLangId == c || editorLangId == cuda-cpp",
           "group": "navigation@100"
         }
+      ],
+      "explorer/context": [
+        {
+          "command": "qtConfigure.openQtDesigner",
+          "when": "resourceExtname =~ /\\.ui$/i",
+          "group": "navigation@40"
+        }
       ]
     },
+    "customEditors": [
+      {
+        "viewType": "qtConfigure.uiDesignerView",
+        "displayName": "Qt Designer",
+        "selector": [
+          {
+            "filenamePattern": "*.ui"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Qt Configure",
@@ -147,6 +168,11 @@
           ],
           "default": "panel",
           "markdownDescription": "按 F1 查看 Qt 帮助时的展示方式 (How to display Qt help when pressing F1)\n\n- `panel`：VS Code 侧边面板（Webview），不离开编辑器\n- `browser`：系统默认浏览器，跨模块链接更完整"
+        },
+        "qtConfigure.designerAutoOpen": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "打开后，双击 .ui 文件不再进入文本编辑器，而是显示占位视图并自动用 Qt Designer 打开 (When enabled, double-clicking a .ui file shows a placeholder view instead of the text editor and opens it with Qt Designer automatically)\n\n开启时会向用户设置 `workbench.editorAssociations` 添加 `*.ui` 与本扩展的关联，关闭时移除该关联 (Enabling adds a `*.ui` association to this extension in the user setting `workbench.editorAssociations`; disabling removes it)"
         }
       }
     }

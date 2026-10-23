@@ -7,8 +7,69 @@
 
 import * as vscode from 'vscode';
 import * as fs from "fs";
+import * as path from "path";
+import { spawn } from "child_process";
 import * as template_files from "./template_files";
 import * as os from "os"
+
+/**
+ * 判断 .ui 是否为 Qt Designer 能打开的格式：XML 且根元素为 <ui>。
+ * 判据对齐 Qt Designer 自身的解析要求（Glade 是 <interface>、Qt3 是 <UI>、
+ * 自定义格式不是 XML），因此嗅探不通过的文件 Designer 本来也打不开。
+ * 只读文件头部 2KB；读失败（不存在/无权限）按非 Qt UI 处理。
+ */
+export function isQtDesignerUiFile(fsPath: string): boolean {
+    let head = "";
+    try {
+        const fd = fs.openSync(fsPath, "r");
+        try {
+            const buf = Buffer.alloc(2048);
+            const n = fs.readSync(fd, buf, 0, buf.length, 0);
+            head = buf.toString("utf8", 0, n);
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch {
+        return false;
+    }
+    // 剥掉 BOM 与前导的 XML 声明/DOCTYPE/注释后再取根元素——
+    // 注释里可能出现 <xxx 字样，不先剥掉会把它误当成根元素
+    let rest = head.replace(/^\uFEFF/, "").replace(/^\s+/, "");
+    for (;;) {
+        if (rest.startsWith("<?")) {
+            const end = rest.indexOf("?>");
+            if (end === -1) {
+                return false;
+            }
+            rest = rest.slice(end + 2).replace(/^\s+/, "");
+        } else if (rest.startsWith("<!--")) {
+            const end = rest.indexOf("-->");
+            if (end === -1) {
+                return false;
+            }
+            rest = rest.slice(end + 3).replace(/^\s+/, "");
+        } else if (rest.startsWith("<!DOCTYPE") || rest.startsWith("<!doctype")) {
+            // DOCTYPE 可能带内部子集 [...]；2KB 内未闭合按非 Qt UI 处理
+            const gt = rest.indexOf(">");
+            if (gt === -1) {
+                return false;
+            }
+            const bracket = rest.indexOf("[");
+            if (bracket !== -1 && bracket < gt) {
+                const close = rest.indexOf("]");
+                if (close === -1) {
+                    return false;
+                }
+                rest = rest.slice(close + 1).replace(/^\s+/, "");
+            } else {
+                rest = rest.slice(gt + 1).replace(/^\s+/, "");
+            }
+        } else {
+            break;
+        }
+    }
+    return /^<ui[\s/>]/.test(rest);
+}
 
 export class QtConfigurator {
     private qtDir: string;
@@ -208,6 +269,68 @@ export class QtConfigurator {
         }
 
         this.qtTerminal.sendText(_qtSelectedKitDir + "/bin/assistant" + this.execSuffix + this.cmdSuffix);
+    }
+
+    /**
+     * 用 Qt Designer 打开指定的 .ui 文件（资源管理器右键 / 占位视图自动打开）
+     * @param filePaths .ui 文件绝对路径列表
+     * @param silent 静默模式（自动打开时不弹成功提示）
+     * @returns 是否成功发起启动
+     */
+    public openUiFile(filePaths: string[], silent: boolean = false): boolean {
+        if (filePaths.length === 0) {
+            return false;
+        }
+        // 过滤掉 Qt Designer 打不开的 .ui（根元素不是 <ui>，如 Glade/自定义格式）
+        const uiFiles: string[] = [];
+        const skipped: string[] = [];
+        for (const filePath of filePaths) {
+            (isQtDesignerUiFile(filePath) ? uiFiles : skipped).push(filePath);
+        }
+        if (skipped.length > 0) {
+            const names = skipped.map(f => path.basename(f)).join(", ");
+            vscode.window.showWarningMessage(
+                `已跳过 Qt Designer 无法打开的 .ui 文件：${names} (Skipped .ui files that Qt Designer cannot open: ${names})`);
+        }
+        if (uiFiles.length === 0) {
+            return false;
+        }
+        let _qtSelectedKitDir = vscode.workspace.getConfiguration().get('qtConfigure.qtKitDir');
+        if (!_qtSelectedKitDir) {
+            vscode.window.showErrorMessage(
+                "尚未选择 Qt 套件，无法打开 Qt Designer (No Qt kit selected, cannot open Qt Designer)",
+                "选择 Qt 套件 (Select Qt Kit)"
+            ).then(item => {
+                if (item) {
+                    vscode.commands.executeCommand('qtConfigure.setQtDir');
+                }
+            });
+            return false;
+        }
+        let designerPath = <string>_qtSelectedKitDir + "/bin/designer" + this.execSuffix;
+        if (!fs.existsSync(designerPath)) {
+            vscode.window.showErrorMessage(
+                `未在 Qt 套件目录下找到 Qt Designer：${designerPath} (Qt Designer not found in Qt kit directory)`);
+            return false;
+        }
+        try {
+            // detached + stdio ignore 独立启动；spawn 的失败（如路径无效）异步抛在 error 事件上，
+            // 必须挂监听才能捕获，unref 避免子进程引用阻碍扩展宿主退出
+            const child = spawn(designerPath, uiFiles, { detached: true, stdio: 'ignore' });
+            child.on('error', err => {
+                vscode.window.showErrorMessage(`启动 Qt Designer 失败 (Failed to start Qt Designer): ${err.message}`);
+            });
+            child.unref();
+            if (!silent) {
+                vscode.window.showInformationMessage(uiFiles.length > 1
+                    ? `已用 Qt Designer 打开 ${uiFiles.length} 个 .ui 文件 (Opened ${uiFiles.length} .ui files with Qt Designer)`
+                    : `已用 Qt Designer 打开 ${path.basename(uiFiles[0])} (Opened with Qt Designer)`);
+            }
+            return true;
+        } catch (error) {
+            vscode.window.showErrorMessage(`启动 Qt Designer 失败 (Failed to start Qt Designer): ${(<Error>error).message}`);
+            return false;
+        }
     }
 
     public closeTerminal() {
