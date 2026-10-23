@@ -2,7 +2,7 @@
   "name": "qtconfigure-enhanced",
   "displayName": "QtConfigure Enhanced",
   "description": "Generating configuration files for Qt project in VSCode",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "engines": {
     "vscode": "^1.63.0"
   },

@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 .workbuddy/**
+.zcode/**
 out/test/**
 
 src/**
